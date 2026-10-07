@@ -614,6 +614,118 @@ async def play_video(
             continue
 
 
+# --------------------------------------------------------------------------
+# [本地改动] 课中弹题（.dialog-test）处理
+#
+# 上游做法有两个致命问题，实测会导致程序永久卡死：
+#
+#   1) 它用 page.wait_for_selector(".el-scrollbar__view") 定位题目，
+#      但页面上有 3 个同名元素（课程目录侧栏也是 el-scrollbar），
+#      取到的是侧栏那个 → 在它里面找 .number 永远是 0 → 从不答题。
+#
+#   2) 它靠 page.press(".el-dialog", "Escape") 关弹窗，实测已失效。
+#      而平台要求「未完成的弹题不能关闭」：未答题时点关闭，会弹出
+#      el-message-box 提示，并把它的 .v-modal 遮罩压在弹题之上
+#      （弹题 z=2001，遮罩 z=2002）—— 此后弹题里任何元素都点不动，
+#      连它自己的关闭按钮也不行，于是彻底卡死。
+#
+# 正确顺序：清除遮挡 → 在 .dialog-test 作用域内答题 → 点「关闭」。
+# --------------------------------------------------------------------------
+QUIZ_DIALOG = ".dialog-test"
+QUIZ_NUMBER = ".number"
+QUIZ_OPTION = ".topic-item"
+QUIZ_ANSWER = ".answer"
+QUIZ_CLOSE_SELECTORS = (
+    ".dialog-test .dialog-footer",
+    ".dialog-test .el-dialog__footer .btn",
+    ".dialog-test .btn",
+)
+
+
+async def _clear_quiz_blockers(page: Page) -> int:
+    """移除压在弹题之上的遮罩与提示框，返回移除的节点数。
+
+    只清理 z-index 不低于弹题的那种遮罩，避免误删别的东西。
+    """
+    try:
+        return await page.evaluate(
+            """() => {
+                const dlg = document.querySelector('.dialog-test');
+                const wrap = dlg && dlg.closest('.el-dialog__wrapper');
+                const dz = wrap ? (parseInt(getComputedStyle(wrap).zIndex) || 0) : 0;
+                let n = 0;
+                document.querySelectorAll('.v-modal').forEach(e => {
+                    if ((parseInt(getComputedStyle(e).zIndex) || 0) >= dz) {
+                        e.remove(); n++;
+                    }
+                });
+                document.querySelectorAll('.el-message-box__wrapper').forEach(e => {
+                    e.remove(); n++;
+                });
+                return n;
+            }"""
+        )
+    except Exception:
+        return 0
+
+
+async def _answer_quiz(page: Page) -> int:
+    """在弹题弹窗作用域内作答，返回成功作答的题数。
+
+    必须把选择器限定在 .dialog-test 内，否则会点到目录侧栏的元素。
+    平台要求「未完成的弹题不能关闭」，所以不答题就关不掉。
+    """
+    answered = 0
+    try:
+        total = max(1, len(await page.query_selector_all(f"{QUIZ_DIALOG} {QUIZ_NUMBER}")))
+        for qi in range(total):
+            if await page.query_selector(f"{QUIZ_DIALOG} {QUIZ_ANSWER}"):
+                continue                      # 这题已有答案回显
+            opts = await page.query_selector_all(f"{QUIZ_DIALOG} {QUIZ_OPTION}")
+            for opt in opts[:2]:
+                try:
+                    await opt.click(timeout=1500)
+                    await page.wait_for_timeout(150)
+                except Exception:
+                    await _clear_quiz_blockers(page)
+                    continue
+                if await page.query_selector(f"{QUIZ_DIALOG} {QUIZ_ANSWER}"):
+                    answered += 1
+                    break
+            # 多题：翻到下一页
+            if total > 1 and qi < total - 1:
+                try:
+                    nxt = await page.query_selector(
+                        f"{QUIZ_DIALOG} .el-pagination button:not([disabled])")
+                    if nxt is not None:
+                        await nxt.click(timeout=1200)
+                        await page.wait_for_timeout(400)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return answered
+
+
+async def _close_quiz(page: Page) -> bool:
+    """关闭弹题弹窗（Escape 已失效，必须点「关闭」按钮）。"""
+    for sel in QUIZ_CLOSE_SELECTORS:
+        try:
+            el = await page.query_selector(sel)
+            if el is None:
+                continue
+            await el.click(timeout=2500)
+            await page.wait_for_timeout(600)
+            if not await has_visible_element(page, (QUIZ_DIALOG,)):
+                return True
+            # 可能又冒出「未完成的弹题不能关闭」，清掉再来
+            await _clear_quiz_blockers(page)
+        except Exception:
+            await _clear_quiz_blockers(page)
+            continue
+    return not await has_visible_element(page, (QUIZ_DIALOG,))
+
+
 async def skip_questions(page: Page, event_loop) -> None:
     await page.wait_for_load_state("domcontentloaded")
     while True:
@@ -633,6 +745,26 @@ async def skip_questions(page: Page, event_loop) -> None:
                 logger.event("答题", 结果="跳过", 原因="课程版本不支持")
                 return
             await asyncio.sleep(2)
+
+            # [本地改动] 优先处理 .dialog-test 弹题（共享课的课中弹题）。
+            # 上游那套全局选择器在这类页面上会取到目录侧栏，导致从不答题、
+            # 弹窗永远关不掉（详见函数上方的说明）。
+            # 注意必须用严格可见性判定：query_selector 对隐藏的残留节点
+            # 也会返回，会让这里每 2 秒误触发一次。
+            if await has_visible_element(page, (QUIZ_DIALOG,)):
+                cleared = await _clear_quiz_blockers(page)
+                if cleared:
+                    logger.event("课中弹题", 处理="清除遮挡", 节点数=cleared)
+                answered = await _answer_quiz(page)
+                closed = await _close_quiz(page)
+                logger.event("课中答题", 已作答=answered,
+                             关闭="成功" if closed else "失败")
+                if not closed:
+                    logger.warn("弹题弹窗未能关闭,将继续尝试.", shift=True)
+                event_loop.set()
+                continue
+
+            # ---- 以下保持上游原有逻辑，用于其它课程类型 ----
             ques_element = await page.wait_for_selector(".el-scrollbar__view", state="attached", timeout=1000)
             total_ques = await ques_element.query_selector_all(".number")
             if total_ques:
