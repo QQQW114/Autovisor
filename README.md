@@ -186,7 +186,7 @@ URLn =
 | 7 | `modules/installer.py` | 放宽依赖版本校验（镜像源版本不符会反复重装并死锁） |
 | 8 | `sweep_captcha.py`、`build_dataset.py`、`regress.py` | **新增** —— 验证码样本采集与离线回归工具 |
 
-### 上游原有流程里的三个坑（本分支已修）
+### 上游原有流程里的四个坑（本分支已修）
 
 1. **课中弹题永远关不掉，程序卡死**（最严重）
    上游用 `page.wait_for_selector(".el-scrollbar__view")` 定位题目，但页面上有 **3 个**同名元素
@@ -197,11 +197,23 @@ URLn =
    `page.press(".el-dialog", "Escape")` 关弹窗实测也已失效。
    本分支改为：**清除遮挡 → 在 `.dialog-test` 作用域内答题 → 点「关闭」按钮**。
 
-2. **`[id^=tcaptcha_transform]` 是常驻隐藏容器**（`opacity=0`、位置 `y=-1000000`）。
+2. **鼠标点一下控制台就把程序冻死**
+   主循环每 0.5 秒往控制台打一次进度条（`show_course_progress` 直接 `print`）。
+   Windows 控制台默认开启**「快速编辑模式」**——只要用鼠标在窗口里点一下就会进入
+   选择态，此时**所有控制台写入被系统冻结**，`print` 永久阻塞，学习循环随之卡死。
+   实测现场：`py-spy dump` 抓到调用栈停在 `progress.py` 的 `print` 上，
+   日志停止输出、视频已播完但程序不动；**在控制台按一下回车就恢复**（这正是退出选择态的方式）。
+   本分支两道防线：
+   - 启动时关闭控制台快速编辑模式（治本，`relax_console()`）
+   - 控制台输出改由独立守护线程用 `os.write` 写、队列满就丢帧（兜底）
+     > 注意不能用 `print`/`sys.stdout` 写：守护线程持有 stdout 缓冲锁时
+     > 解释器关闭会触发 `Fatal Python error: _enter_buffered_busy` 直接崩进程。
+
+3. **`[id^=tcaptcha_transform]` 是常驻隐藏容器**（`opacity=0`、位置 `y=-1000000`）。
    Playwright 的 `is_visible()` 会把它判为"可见" → 误认为验证码一直在 → 程序卡死。
    必须用带 `opacity` + 视口位置检查的判定。
 
-3. **验证控件消失 ≠ 页面已恢复**。过早放行会让主流程找不到 `video` 元素而崩溃。
+4. **验证控件消失 ≠ 页面已恢复**。过早放行会让主流程找不到 `video` 元素而崩溃。
 
 ## 已知能力边界
 

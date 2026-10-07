@@ -240,7 +240,7 @@ async def auto_login(context: BrowserContext, page: Page, config, modules=None) 
     if config.username and config.password:
         try:
             # [本地改动] 按 login_mode 选择登录通道。
-            # 纯学号（如 8 位/10 位纯数字学号）在"账号登录"页签下不适用，
+            # 纯数字学号在"账号登录"页签下不适用，
             # 必须切到"学号登录"并补填学校/机构。
             done = False
 
@@ -486,6 +486,44 @@ def parse_args():
     return parser.parse_args()
 
 
+def relax_console() -> str:
+    """[本地改动] 关闭 Windows 控制台的"快速编辑模式"，返回结果描述。
+
+    踩过的坑：主循环每 0.5 秒往控制台打一次进度条。Windows 控制台默认开启
+    快速编辑模式，只要用鼠标在窗口里点一下就会进入选择态，此时**所有控制台
+    写入被系统冻结**，print 会一直阻塞 —— 整个学习循环随之卡死（实测现场：
+    py-spy 抓到栈停在 progress.py 的 print 上，日志停止输出、视频已播完但
+    程序不动；在控制台按一下回车就恢复）。
+
+    关闭该模式后就不会被鼠标点击冻住。另外 progress.py 已把控制台输出
+    挪到独立守护线程，双保险。
+    """
+    if platform.system() != "Windows":
+        return "非 Windows，跳过"
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        STD_INPUT_HANDLE = -10
+        ENABLE_QUICK_EDIT_MODE = 0x0040
+        ENABLE_EXTENDED_FLAGS = 0x0080
+
+        handle = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+        if handle in (0, -1):
+            return "无控制台（输出被重定向）"
+        mode = ctypes.c_uint()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return "读取控制台模式失败"
+        if not (mode.value & ENABLE_QUICK_EDIT_MODE):
+            return "本就是关闭状态"
+        new_mode = (mode.value & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS
+        if kernel32.SetConsoleMode(handle, new_mode):
+            return "已关闭（防止鼠标点击冻住控制台）"
+        return "设置失败"
+    except Exception as exc:
+        return f"异常: {exc}"
+
+
 def cli() -> int:
     global logger
     args = parse_args()
@@ -495,6 +533,7 @@ def cli() -> int:
     try:
         logger.section("初始化")
         logger.info("程序启动中...")
+        logger.debug(f"控制台快速编辑模式: {relax_console()}")
         logger.event(
             "运行环境",
             版本=__version__,
