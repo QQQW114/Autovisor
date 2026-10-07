@@ -18,8 +18,8 @@ echo [2/4] Checking environment...
 if not exist "%~dp0.venv\Scripts\python.exe" goto NOVENV
 echo       OK
 
-echo [3/4] Checking account info...
-"%~dp0.venv\Scripts\python.exe" "%~dp0setup_account.py"
+echo [3/4] Checking account and course info...
+"%~dp0.venv\Scripts\python.exe" "%~dp0setup_wizard.py"
 if errorlevel 1 goto SETUPFAIL
 if not exist "%~dp0config.ini" goto NOCONFIG
 
@@ -50,9 +50,11 @@ echo.
 echo   [ERROR] Python env not found:
 echo           %~dp0.venv\Scripts\python.exe
 echo.
-echo   Install dependencies first, e.g.
+echo   Install dependencies first:
 echo     uv venv .venv --python 3.13
 echo     uv pip install --python .venv\Scripts\python.exe httpx pillow playwright pygetwindow requests numpy opencv-python ddddocr
+echo.
+echo   (or see README "Deployment" section)
 echo.
 pause
 exit /b 1

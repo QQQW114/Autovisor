@@ -26,6 +26,117 @@
 - 不需要任何 API key
 - 不会把验证码图片传到第三方打码平台
 
+## 快速开始（从零部署到能跑）
+
+### 1. 准备环境
+
+需要 **Python 3.13**（推荐用 [uv](https://github.com/astral-sh/uv) 管理环境）。
+
+```bash
+git clone https://github.com/QQQW114/Autovisor.git
+cd Autovisor
+
+uv venv .venv --python 3.13
+uv pip install --python .venv/Scripts/python.exe httpx pillow playwright pygetwindow requests numpy opencv-python ddddocr
+.venv/Scripts/python.exe -m playwright install msedge
+```
+
+> 不用 uv 也行：把 `uv venv .venv --python 3.13` 换成 `python -m venv .venv`，
+> 把 `uv pip install --python <路径>` 换成 `.venv/Scripts/pip install` 即可。
+>
+> `ddddocr` 是本分支新增的依赖（验证码识别用），上游不需要。
+
+### 2. 首次运行
+
+**Windows**：双击 `启动.bat`
+**macOS**：`./run_macos.sh`
+
+程序在进入主流程前会先跑一次**配置向导**，问你两件事：
+
+```
+填写账号信息
+  学校全称（例：XX职业技术学院）:          ← 学号登录才问
+  智慧树账号（手机号 / 邮箱 / 纯学号）:
+  密码:                                    ← 输入时不回显
+
+填写课程链接
+  课程播放页地址（浏览器打开课程后复制地址栏整条链接）:
+```
+
+**课程链接怎么拿**：
+浏览器登录智慧树 → 「我的学堂」→ 点开课程 → 点进任意一集视频的**播放页** →
+复制地址栏**整条**链接。
+
+必须是能直接看到**视频播放器**的页面。不要填课程介绍页 / 学堂首页，
+否则程序找不到课程目录。
+
+填完写进 `config.ini`，以后不再问。已有的值不会被覆盖，只补空缺项。
+
+### 3. 确认跑起来了
+
+日志在 `logs/` 最新那个 `.txt`。正常会滚动出现：
+
+```
+正在学习:1.1.1、xxx
+课时结果 | 序号=1/52 完成=True 平台进度=100%
+正在学习:1.1.2、xxx
+```
+
+看到 `异常脚本` / `关闭插件` / `课程锁定` 立即停程序。
+
+> ⚠️ **不要关闭、也不要最小化**浏览器窗口（最小化会暂停渲染，连播放都会停）。
+> 想后台挂机就把 `config.ini` 里 `enableHideWindow` 改成 `True`（移出屏幕，不是最小化）。
+
+### 4. 验证码与弹题怎么处理
+
+不用管，程序会自己处理：
+
+| 情况 | 程序行为 | 什么时候需要你 |
+|---|---|---|
+| 登录滑块 | 自动过（`enableAutoCaptcha = True`） | 过不去时改成 `manualLogin = True` 手动拖一次 |
+| 课中弹题 | 自动答题 + 自动关闭 | 不需要 |
+| 课中人机验证 | 自动作答，**最多 3 次** | 3 次没过会停下等你，完成后自动恢复 |
+
+需要你动手的唯一场景：日志出现 `自动作答未成功，请手动完成验证...`。
+
+## 换课程 / 换账号
+
+**方式一：双击 `换课程.bat`**（最省事）
+
+```
+[1] Change course URL
+[2] Change account
+[3] Change both
+[0] Exit
+```
+
+**方式二：命令行**
+
+```bash
+python setup_wizard.py --course     # 换课程
+python setup_wizard.py --account    # 换账号
+python setup_wizard.py --all        # 两个都重填
+python setup_wizard.py --show       # 只看当前配置（账号打码显示）
+```
+
+**方式三：直接改 `config.ini`**
+
+```ini
+[course-url]
+URL1 = https://studyvideoh5.zhihuishu.com/stuStudy?recruitAndCourseId=xxxxxxxx
+URL2 =
+URL3 =
+URLn =
+```
+
+**要跑多门课**：依次填 `URL1`、`URL2`、`URL3`…
+程序会**一门一门串行**跑完（不是同时开）。跑完一门自动切下一门。
+
+未用完的行留空即可（启动时每个空行会打一条"不是一个有效网址"，忽略它）。
+
+> **改完必须重启程序才生效。** 另外注意 `config.ini` 已被 `.gitignore` 排除，
+> 不会被提交到仓库。
+
 ## 支持哪些题面
 
 平台的课中验证是腾讯 tcaptcha 点选类，实测有 6 种题面：
@@ -103,11 +214,14 @@
 
 离线回归现状：**12 个样本 → 9 个给出结论 / 0 异常 / 3 个拒答**。
 
-## 验证码研究工具
+## 验证码求解器的开发工具（可选）
 
-有验证码挂着的页面时，可以批量采集样本来验证识别率：
+在 `tools/captcha/` 下。这些不是运行必需，是给"想继续改进识别率"的人用的。
+
+有验证码挂着的页面时，可以批量采集样本：
 
 ```bash
+cd tools/captcha
 python sweep_captcha.py 30     # 点验证码右上角"刷新"按钮换题，采 30 个
                                # 刷新只换题、不计失败，所以可以放心点
 python build_dataset.py        # 从日志+截图重建「题目+图片」配对
@@ -115,6 +229,11 @@ python regress.py              # 跑离线回归，输出报告 + 每题标注�
 ```
 
 产物落在 `verify_shots/`（已加入 `.gitignore`，不会误提交）。
+
+离线回归现状：**12 个样本 → 9 个给出结论 / 0 异常 / 3 个拒答**。
+
+> 注意：这几个脚本的路径是按项目根目录写的，
+> 若移动位置需要同步改脚本里的 `RUN` 常量。
 
 ---
 
