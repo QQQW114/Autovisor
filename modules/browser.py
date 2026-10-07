@@ -78,6 +78,9 @@ def is_loopback_cdp_endpoint(endpoint: str) -> bool:
     return host in {"127.0.0.1", "localhost", "::1"}
 
 
+PROFILE_DIR = Path(__file__).resolve().parent.parent / "data" / "profile"
+
+
 def _launch_args(config) -> dict:
     driver = get_effective_driver(config.driver)
     channel = resolve_browser_channel(driver)
@@ -89,6 +92,12 @@ def _launch_args(config) -> dict:
             "--window-position=100,100",
         ],
     }
+    # [本地改动] 固定 user-data-dir，让登录态在两次运行之间保留。
+    # 原生实现不传此项，Playwright 每次新建临时 profile，
+    # 导致每轮启动都要重新登录、反复卡在登录页。
+    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    args["user_data_dir"] = str(PROFILE_DIR)
+
     if executable_path:
         args["executable_path"] = executable_path
     elif channel:
@@ -96,13 +105,20 @@ def _launch_args(config) -> dict:
     return args
 
 
-async def _launch_browser(playwright: Playwright, config, logger) -> Browser:
+async def _launch_browser(playwright: Playwright, config, logger):
+    """[本地改动] 返回持久化 context。
+
+    playwright.chromium.launch() 不接受 user_data_dir，会每次新建临时 profile，
+    登录态无法保留。改用 launch_persistent_context()，把 profile 固定在
+    avsrc/data/profile，登录一次即可长期复用。
+    返回值语义随之从 Browser 变成 BrowserContext。
+    """
     launch_args = _launch_args(config)
     try:
-        return await playwright.chromium.launch(**launch_args)
+        return await playwright.chromium.launch_persistent_context(**launch_args)
     except TargetClosedError as exc:
         logger.log_exception("首次启动浏览器失败,准备重试.", exc)
-        return await playwright.chromium.launch(**launch_args)
+        return await playwright.chromium.launch_persistent_context(**launch_args)
 
 
 async def create_browser_session(
@@ -141,20 +157,22 @@ async def create_browser_session(
             ) from exc
     else:
         logger.info(f"正在启动 {config.driver} 浏览器...")
-        browser = await _launch_browser(playwright, config, logger)
+        # [本地改动] _launch_browser 现在返回持久化 context（BrowserContext），
+        # 其中已包含默认页面，不能再调用 browser.new_context()。
+        context = await _launch_browser(playwright, config, logger)
         try:
-            context = await browser.new_context()
             if cookies:
                 await context.add_cookies(cookies)
                 logger.info("已加载 Cookies!")
             else:
                 logger.info("未找到 Cookies,将跳转至登录页.")
-            page = await context.new_page()
+            page = context.pages[0] if context.pages else await context.new_page()
             await _prepare_page(page, logger)
-            return BrowserSession(browser, context, page, False)
+            # browser 位传 context，保证 close() 时能真正关掉持久化浏览器
+            return BrowserSession(context, context, page, False)
         except BaseException:
             try:
-                await browser.close()
+                await context.close()
             except TargetClosedError:
                 pass
             raise
@@ -163,6 +181,10 @@ async def create_browser_session(
 async def _prepare_page(page: Page, logger) -> None:
     stealth_path = Path(logger.runtime_root) / "res" / "stealth.min.js"
     if stealth_path.is_file():
-        await page.add_init_script(path=str(stealth_path))
-        logger.debug("stealth.js执行完成.")
+        # [本地改动] 挂到 context 而非 page。
+        # page.add_init_script 只覆盖当前这一个 Page 对象，页面跳转或
+        # 浏览器自行开的新标签不会被注入，navgator.webdriver 等特征会裸奔。
+        # context 级注入对新开的每个文档都生效。
+        await page.context.add_init_script(path=str(stealth_path))
+        logger.debug("stealth.js 已注入（context 级）")
     page.set_default_timeout(24 * 3600 * 1000)

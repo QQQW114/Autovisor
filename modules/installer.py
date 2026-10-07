@@ -254,10 +254,15 @@ def is_installed(package, version):
         module = import_module(mapping[package])
         installed_version = getattr(module, "__version__", None)
         expected_version = normalize_version(package, version)
+        # [本地改动] 放宽版本校验：能 import 成功即可用。
+        # 原逻辑要求版本字符串完全相等，但镜像源给的 wheel 与请求版本
+        # 常有偏差（请求 4.10.0.84、实得 4.10.0.82），会触发无谓重装；
+        # 而重装过程中 cv2.pyd 一旦被占用就死循环。这里只做提示不改行为。
         if installed_version and installed_version != expected_version:
-            logger.warn(f"检测到 {package}-{installed_version}，与目标版本 {version} 不一致，将重新安装。")
-            return None, False
-        logger.info(f"{package}-{version} 已安装！")
+            logger.warn(
+                f"检测到 {package}-{installed_version}，与目标版本 {version} 不同，但可导入，直接使用。"
+            )
+        logger.info(f"{package}-{installed_version or version} 已安装！")
         return module, True
     except ImportError:
         return None, False

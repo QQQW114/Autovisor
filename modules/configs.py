@@ -20,6 +20,15 @@ class Config:
             self.driver = self.get_driver()
             self.username = self._config.get('user-account', 'username', raw=True)
             self.password = self._config.get('user-account', 'password', raw=True)
+            # [本地改动] 学号登录所需的学校/机构名
+            self.school = self._config.get('user-account', 'school', raw=True, fallback='').strip()
+            # [本地改动] 登录方式：account(默认账号密码) / student(学号登录)
+            self.login_mode = self._config.get('user-account', 'login_mode', raw=True, fallback='student').strip().lower()
+            # [本地改动] 手动登录模式：程序只填表，滑块留给用户。
+            # 依赖固定 profile，登录一次后可长期免登录。
+            self.manual_login = self.get_bool_field('user-account', 'manualLogin', fallback=False)
+            # [本地改动] 浏览器代理。留空 = 跟随系统（TUN 模式下应留空）。
+            self.proxy_server = self._config.get('browser-option', 'proxyServer', raw=True, fallback='').strip()
             # 浏览器选项
             self.exe_path = self._config.get('browser-option', 'EXE_PATH', raw=True)
             self.attach_existing_chrome = self.get_bool_field('browser-option', 'attachExistingChrome', fallback=False)

@@ -20,3 +20,14 @@ captcha/
 logs/
 ./preview/*
 *.egg-info/
+
+# ---- 本分支新增：验证码求解的开发产物 ----
+# 这些是运行期产生的样本/截图/回归报告，不应入库
+verify_shots/
+_sweep/
+_dataset/
+_live/
+preview/
+*.whl
+run.log
+run_*.log

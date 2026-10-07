@@ -24,7 +24,11 @@ from modules.login import (
     LOGIN_SUBMIT_SELECTOR,
     LOGIN_USERNAME_SELECTOR,
     accept_login_terms,
+    fill_login_form_for_manual,
+    fill_student_login,
     is_login_page,
+    submit_login,
+    switch_to_student_tab,
     wait_for_login_complete,
 )
 from modules.logger import Logger
@@ -119,41 +123,81 @@ async def init_page(p: Playwright, config, cookies) -> tuple[Page, BrowserContex
         可执行文件=config.exe_path or "默认",
         窗口大小=f"{screen_width}x{screen_height}",
     )
+    args = [
+        "--start-maximized",
+        f"--window-size={screen_width},{screen_height}",
+        "--window-position=0,0",
+        # [本地改动 4] 开放调试端口，便于外部脚本连上页面做取数/调试
+        # （验证码题面读取、DOM 探查等）。仅监听本机回环。
+        "--remote-debugging-port=9222",
+        "--remote-allow-origins=http://127.0.0.1:9222",
+    ]
+    # [本地改动 3] 代理交给配置决定，默认不显式指定（跟随系统）。
+    # 早先写死 --proxy-server=127.0.0.1:7897 是为了修登录后中转页加载不完；
+    # 但代理软件切到 TUN 模式后会在系统层接管全部流量，此时浏览器再显式
+    # 指定代理反而会冲突，导致页面一直 ready=loading、最终被重定向。
+    proxy_server = str(getattr(config, "proxy_server", "") or "").strip()
+    if proxy_server.lower() in ("none", "off", "direct", "system"):
+        proxy_server = ""
+    if proxy_server:
+        args.append(f"--proxy-server={proxy_server}")
+        logger.info(f"浏览器代理: {proxy_server}")
+    else:
+        logger.info("浏览器代理: 跟随系统（未显式指定）")
+
     launch_args = {
         "channel": driver,
         "headless": False,
         "executable_path": config.exe_path if config.exe_path else None,
-        "args": [
-            "--start-maximized",
-            f"--window-size={screen_width},{screen_height}",
-            "--window-position=0,0",
-        ],
+        "args": args,
     }
+    # [本地改动 1] 固定 user-data-dir，让登录态在两次运行之间保留。
+    # 原生实现不传此项，Playwright 每次新建临时 profile，
+    # 导致每轮启动都重新登录、反复卡登录页。
     try:
-        browser = await p.chromium.launch(**launch_args)
+        profile_dir = get_runtime_path("data", "profile")
+        os.makedirs(profile_dir, exist_ok=True)
+        launch_args["user_data_dir"] = str(profile_dir)
+        logger.info(f"使用固定 profile: {profile_dir}")
+    except Exception as exc:
+        logger.info(f"固定 profile 失败，回退临时 profile: {exc}")
+
+    try:
+        # [本地改动 2] launch() 不接受 user_data_dir，改用持久化 context。
+        browser = await p.chromium.launch_persistent_context(**launch_args)
     except TargetClosedError as exc:
         logger.log_exception("首次启动浏览器失败,准备重试.", exc)
         logger.info("检测到浏览器首次启动失败,正在重试...")
         await asyncio.sleep(1)
-        browser = await p.chromium.launch(**launch_args)
-    logger.event("浏览器已启动", 版本=getattr(browser, "version", "未知"))
-    # 使用真实窗口尺寸，避免 Playwright 默认 viewport 覆盖最大化窗口。
-    context = await browser.new_context(viewport=None)
+        browser = await p.chromium.launch_persistent_context(**launch_args)
+    logger.event("浏览器已启动", 版本=getattr(browser, "browser", None) and browser.browser.version or "未知")
+    # [本地改动 3] 持久化 context 已自带页面，不能再 new_context()。
+    context = browser
+    page = context.pages[0] if context.pages else await context.new_page()
     if cookies:
         await context.add_cookies(cookies)
         logger.info("已加载 Cookies!")
     else:
         logger.info("未找到 Cookies,将跳转至登录页.")
-    page = await context.new_page()
     logger.debug(f"{config.driver}浏览器启动完成.")
     # 抹去特征
     with open(get_runtime_path("resources", "stealth.min.js"), 'r') as f:
         js = f.read()
-    await page.add_init_script(js)
-    logger.debug("stealth.js执行完成.")
+    # [本地改动 4] 挂到 context 而非 page，覆盖跳转与新开标签
+    await context.add_init_script(js)
+    logger.debug("stealth.js 已注入（context 级）")
     page.set_default_timeout(24 * 3600 * 1000)
 
     return page, context
+
+
+async def _wait_login_done(page, seconds: float = 1800) -> bool:
+    """等待离开智慧树登录域，超时返回 False（不抛异常）。"""
+    try:
+        await wait_for_login_complete(page, timeout=seconds * 1000)
+        return True
+    except TimeoutError:
+        return False
 
 
 async def auto_login(context: BrowserContext, page: Page, config, modules=None) -> None:
@@ -163,23 +207,82 @@ async def auto_login(context: BrowserContext, page: Page, config, modules=None) 
         logger.info("检测到已登录,跳过登录步骤.")
         return
 
+    mode = getattr(config, "login_mode", "student")
+    school = getattr(config, "school", "") or ""
+    manual = getattr(config, "manual_login", False)
+
+    if manual:
+        # [本地改动] 手动协作模式：程序把表单填好，滑块交给你。
+        # 易盾是反自动化设计（失败即换题），人工拖一次最省时；
+        # 登录态写入固定 profile 后可长期免登录。
+        logger.info("=" * 56)
+        logger.info("手动登录模式：表单已自动填好，请你在浏览器里拖滑块并点登录")
+        logger.info(f"  学校={school}  学号={config.username}")
+        logger.info("  登录成功后程序会自动继续（最多等 30 分钟）")
+        logger.info("=" * 56)
+        try:
+            await fill_login_form_for_manual(
+                page, mode, school, config.username, config.password
+            )
+            logger.event("手动登录", 表单="已填好", 等待="用户完成人机验证")
+        except Exception as exc:
+            logger.warn(f"预填表单失败，请完全手动登录：{exc}")
+
+        ok = await _wait_login_done(page, 1800)
+        if not ok:
+            logger.warn("等待登录超时（30 分钟）。")
+            return
+        logger.event("登录完成", 耗时=f"{time.time() - wait_start:.1f}s", 地址=page.url)
+        await persist_login_cookies(context)
+        logger.info(f"已保存登录凭证到: {COOKIE_PATH},下次可免密登录.")
+        return
+
     if config.username and config.password:
         try:
-            username = await page.wait_for_selector(
-                LOGIN_USERNAME_SELECTOR, state="visible", timeout=30000
-            )
-            password = await page.wait_for_selector(
-                LOGIN_PASSWORD_SELECTOR, state="visible", timeout=30000
-            )
-            logger.event("自动登录", 方式="账号密码", 账号="已填写")
-            await username.fill(config.username)
-            await password.fill(config.password)
-            await accept_login_terms(page)
-            submit = await page.wait_for_selector(
-                LOGIN_SUBMIT_SELECTOR, state="visible", timeout=30000
-            )
-            await page.wait_for_timeout(500)
-            await submit.click()
+            # [本地改动] 按 login_mode 选择登录通道。
+            # 纯学号（如 8 位/10 位纯数字学号）在"账号登录"页签下不适用，
+            # 必须切到"学号登录"并补填学校/机构。
+            done = False
+
+            if mode == "student":
+                if await switch_to_student_tab(page):
+                    filled = await fill_student_login(
+                        page, school, config.username, config.password
+                    )
+                    logger.event("自动登录", 方式="学号登录",
+                                 学校=school or "未填", 表单="已填" if filled else "未填全")
+                    # 协议必须在填表后勾选，并在提交前再确认一次；
+                    # Element UI 的 checkbox 是切换式的，盲点会点反。
+                    agreed = await accept_login_terms(page)
+                    logger.event("自动登录", 协议="已勾选" if agreed else "勾选失败")
+                    if not filled:
+                        logger.warn("学号登录表单未填完整，改为等待人工完成。")
+                    else:
+                        if not agreed:
+                            logger.warn("协议未能勾选，提交前再试一次。")
+                            await accept_login_terms(page)
+                        await page.wait_for_timeout(500)
+                        await submit_login(page)
+                        done = True
+                else:
+                    logger.warn("未找到「学号登录」页签，回退账号登录。")
+
+            if not done:
+                username = await page.wait_for_selector(
+                    LOGIN_USERNAME_SELECTOR, state="visible", timeout=30000
+                )
+                password = await page.wait_for_selector(
+                    LOGIN_PASSWORD_SELECTOR, state="visible", timeout=30000
+                )
+                logger.event("自动登录", 方式="账号密码", 账号="已填写")
+                await username.fill(config.username)
+                await password.fill(config.password)
+                await accept_login_terms(page)
+                submit = await page.wait_for_selector(
+                    LOGIN_SUBMIT_SELECTOR, state="visible", timeout=30000
+                )
+                await page.wait_for_timeout(500)
+                await submit.click()
         except TimeoutError:
             if is_login_page(page.url):
                 logger.warn("未找到自动登录控件,请在浏览器中手动完成登录.", shift=True)
@@ -190,13 +293,18 @@ async def auto_login(context: BrowserContext, page: Page, config, modules=None) 
         logger.event("滑块任务", 状态="启动")
         captcha_task = asyncio.create_task(slider_verify(page, modules))
 
-    try:
-        await wait_for_login_complete(page)
-    finally:
-        if captcha_task:
-            if not captcha_task.done():
-                captcha_task.cancel()
-            await asyncio.gather(captcha_task, return_exceptions=True)
+    # [本地改动] 原本这里是无超时等待（wait_for_login_complete 默认 24h）。
+    # 设 30 分钟上限，既给自动滑块足够重试时间，也避免无限挂起。
+    ok = await _wait_login_done(page, 1800)
+    if captcha_task:
+        if not captcha_task.done():
+            captcha_task.cancel()
+        await asyncio.gather(captcha_task, return_exceptions=True)
+
+    if not ok:
+        logger.warn("等待登录完成超时（30 分钟）。若看到人机验证，请手动完成，"
+                    "或在 config.ini 设 manualLogin = True 走手动登录模式。")
+        return
 
     logger.event("登录完成", 耗时=f"{time.time() - wait_start:.1f}s", 地址=page.url)
     await persist_login_cookies(context)

@@ -1,13 +1,25 @@
 [user-account]
-;配置账号密码，留空则打开网页后需手动登录
+;智慧树账号。留空时启动脚本会提示你输入（仓库不携带任何凭据）
+;username 支持：手机号 / 邮箱 / 纯学号
 username =
 password =
+;登录方式: student=学号登录(需填 school) / account=账号登录(手机号或邮箱)
+login_mode = student
+;学校全称，login_mode=student 时必填。例：XX职业技术学院
+school =
+;True=程序只帮你填好表单，滑块留给你手动拖一次
+;登录态会存进 data/profile，之后长期免登录
+manualLogin = False
 
 [browser-option]
 ;配置浏览器,可选 Edge 或 Chrome
 driver = Edge
 ;指定浏览器所在路径,不填则使用默认路径
 EXE_PATH =
+;浏览器代理,例 http://127.0.0.1:7897
+;系统代理关闭时必须显式填,否则浏览器不走代理
+;若代理软件用 TUN 模式接管了全部流量,则留空
+proxyServer =
 
 [script-option]
 ;是否自动过登录时的滑块验证(默认:True)
